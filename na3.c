@@ -6,7 +6,7 @@
 #include <time.h>     // Dla funkcji time() (inicjalizacja generatora liczb losowych)
 #include <stdbool.h>  // Dla typów bool, true, false
 
-#define NUM_HOUSES_TOTAL 5 // Całkowita liczba domów do okradzenia (symboliczna)
+#define NUM_HOUSES_TOTAL 5 // Całkowita liczba domów
 #define NUM_OPERATIONS 2   // Ile razy każdy proces (złodziej) spróbuje coś ukraść
 
 // Typy wiadomości używane w komunikacji MPI
@@ -188,7 +188,7 @@ int main(int argc, char* argv[]) {
                     is_active[msg_in.sender_rank] = false; // Oznacz proces jako nieaktywny
                 }
             } else {
-                usleep(1000); // Krótka pauza, aby nie obciążać CPU w pętli oczekiwania
+                usleep(10000); // Krótka pauza, aby nie obciążać CPU w pętli oczekiwania
             }
         }
 

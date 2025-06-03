@@ -6,8 +6,8 @@
 #include <time.h>   // For time()
 #include <stdbool.h> // For bool, true, false
 
-#define NUM_HOUSES_TOTAL 1 // Przykładowa łączna liczba domów (zasobów)
-#define P_FENCES 1          // Liczba dostępnych paserów
+#define NUM_HOUSES_TOTAL 3 // Przykładowa łączna liczba domów (zasobów)
+#define P_FENCES 7        // Liczba dostępnych paserów
 #define NUM_OPERATIONS 2    // Ile razy każdy złodziej spróbuje coś ukraść i spieniężyć
 
 // Typy wiadomości
@@ -131,7 +131,7 @@ int main(int argc, char* argv[]) {
                 MPI_Send(&msg_out_steal, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
             }
         }
-        printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** z moim czasem (ts=%d) do wszystkich innych procesów.\n", my_rank, clock, get_message_type_name(MSG_STEAL_REQ), my_steal_req.timestamp);
+        // printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** z moim czasem (ts=%d) do wszystkich innych procesów.\n", my_rank, clock, get_message_type_name(MSG_STEAL_REQ), my_steal_req.timestamp);
 
         while (true) { 
             int my_idx_steal = find_my_request_index(steal_requests_queue, steal_requests_queue_size, my_rank);
@@ -187,7 +187,7 @@ int main(int argc, char* argv[]) {
                     clock++;
                     Message msg_ack = {MSG_FENCE_ACK, clock, my_rank};
                     MPI_Send(&msg_ack, sizeof(Message), MPI_BYTE, msg_in.sender_rank, 0, MPI_COMM_WORLD);
-                    printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** (ts=%d) do procesu %d w odpowiedzi na żądanie pasera.\n", my_rank, clock, get_message_type_name(MSG_FENCE_ACK), clock, msg_in.sender_rank);
+                    // printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** (ts=%d) do procesu %d w odpowiedzi na żądanie pasera.\n", my_rank, clock, get_message_type_name(MSG_FENCE_ACK), clock, msg_in.sender_rank);
                 } else if (msg_in.type == MSG_FENCE_REL) {
                     remove_from_queue_by_rank(fence_requests_queue, &fence_requests_queue_size, msg_in.sender_rank);
                 } else if (msg_in.type == MSG_FENCE_ACK) {
@@ -235,7 +235,7 @@ int main(int argc, char* argv[]) {
                 MPI_Send(&msg_out_fence, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
             }
         }
-        printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** z moim czasem (ts=%d) do wszystkich innych procesów.\n", my_rank, clock, get_message_type_name(MSG_FENCE_REQ), my_fence_req.timestamp);
+        // printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** z moim czasem (ts=%d) do wszystkich innych procesów.\n", my_rank, clock, get_message_type_name(MSG_FENCE_REQ), my_fence_req.timestamp);
 
         while (true) { 
             int my_idx_fence = find_my_request_index(fence_requests_queue, fence_requests_queue_size, my_rank);
@@ -274,7 +274,7 @@ int main(int argc, char* argv[]) {
                 MPI_Recv(&msg_in, sizeof(Message), MPI_BYTE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
                 
                 clock = max(clock, msg_in.timestamp) + 1;
-                printf("--- Proces %d --- [Zegar: %d] Odebrałem wiadomość: **%s** od procesu %d z timestampem (ts=%d). Aktualizuję zegar.\n", my_rank, clock, get_message_type_name(msg_in.type), msg_in.sender_rank, msg_in.timestamp);
+                // printf("--- Proces %d --- [Zegar: %d] Odebrałem wiadomość: **%s** od procesu %d z timestampem (ts=%d). Aktualizuję zegar.\n", my_rank, clock, get_message_type_name(msg_in.type), msg_in.sender_rank, msg_in.timestamp);
                 
                 if (msg_in.type == MSG_STEAL_REQ || msg_in.type == MSG_STEAL_REL) {
                        highest_ts_received_steal[msg_in.sender_rank] = max(highest_ts_received_steal[msg_in.sender_rank], msg_in.timestamp);
@@ -288,7 +288,7 @@ int main(int argc, char* argv[]) {
                     clock++;
                     Message msg_ack = {MSG_FENCE_ACK, clock, my_rank};
                     MPI_Send(&msg_ack, sizeof(Message), MPI_BYTE, msg_in.sender_rank, 0, MPI_COMM_WORLD);
-                    printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** (ts=%d) do procesu %d w odpowiedzi na żądanie pasera.\n", my_rank, clock, get_message_type_name(MSG_FENCE_ACK), clock, msg_in.sender_rank);
+                    // printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** (ts=%d) do procesu %d w odpowiedzi na żądanie pasera.\n", my_rank, clock, get_message_type_name(MSG_FENCE_ACK), clock, msg_in.sender_rank);
                 } else if (msg_in.type == MSG_FENCE_REL) {
                     remove_from_queue_by_rank(fence_requests_queue, &fence_requests_queue_size, msg_in.sender_rank);
                 } else if (msg_in.type == MSG_FENCE_ACK) {
