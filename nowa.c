@@ -1,230 +1,176 @@
-#include <mpi.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <time.h>
-#include <stdbool.h>
+#include <mpi.h>         // MPI biblioteka do komunikacji międzyprocesowej
+#include <stdio.h>       // Standardowe wejście/wyjście (np. printf)
+#include <stdlib.h>      // Standardowe funkcje biblioteczne (np. rand, qsort, malloc)
+#include <string.h>      // Funkcje do operacji na stringach (nieużywane bezpośrednio, ale często przydatne)
+#include <unistd.h>      // Dla funkcji usleep (pauza)
+#include <time.h>        // Dla funkcji time() (inicjalizacja generatora liczb losowych)
+#include <stdbool.h>     // Dla typów bool, true, false
 
-#define NUM_HOUSES_TOTAL 5
-#define NUM_OPERATIONS 2
+#define NUM_HOUSES_TOTAL 2 // Całkowita liczba domów
+#define NUM_OPERATIONS 2   // Ile razy każdy proces (złodziej) spróbuje coś ukraść
 
+// Typy wiadomości używane w komunikacji MPI
 typedef enum {
-    MSG_STEAL_REQ,
-    MSG_STEAL_REL,
-    MSG_TERMINATE
+    MSG_REQ,         // Żądanie dostępu do sekcji krytycznej (Request)
+    MSG_ACK,         // Potwierdzenie / Zgoda (Acknowledgement)
+    MSG_TERMINATE    // Wiadomość informująca o zakończeniu pracy przez proces
 } MessageType;
 
+// Struktura wiadomości przesyłanej między procesami
 typedef struct {
-    MessageType type;
-    int timestamp;
-    int sender_rank;
-    int house_id;  // Dodano: identyfikator domu
+    MessageType type;      // Typ wiadomości (z enum MessageType)
+    int timestamp;         // Zegar Lamporta nadawcy wiadomości
+    int sender_rank;       // Ranga (ID) procesu wysyłającego wiadomość
 } Message;
 
-typedef struct {
-    int timestamp;
-    int rank;
-} Request;
-
-int compare_requests(const void* a, const void* b) {
-    Request* r_a = (Request*)a;
-    Request* r_b = (Request*)b;
-    if (r_a->timestamp != r_b->timestamp) {
-        return r_a->timestamp - r_b->timestamp;
-    }
-    return r_a->rank - r_b->rank;
-}
-
-void add_to_queue(Request queue[], int* size, Request req) {
-    queue[*size] = req;
-    (*size)++;
-    qsort(queue, *size, sizeof(Request), compare_requests);
-}
-
-void remove_from_queue_by_rank(Request queue[], int* size, int rank_to_remove) {
-    int i, j;
-    for (i = 0; i < *size; i++) {
-        if (queue[i].rank == rank_to_remove) {
-            for (j = i; j < (*size) - 1; j++) {
-                queue[j] = queue[j + 1];
-            }
-            (*size)--;
-            return;
-        }
-    }
-}
-
-int find_my_request_index(Request queue[], int size, int my_rank) {
-    for (int i = 0; i < size; i++) {
-        if (queue[i].rank == my_rank) {
-            return i;
-        }
-    }
-    return -1;
-}
-
+// Prosta funkcja zwracająca większą z dwóch liczb.
 int max(int a, int b) {
     return a > b ? a : b;
 }
 
+// Funkcja pomocnicza do zwracania nazwy typu wiadomości jako string (dla logowania).
 const char* get_message_type_name(MessageType type) {
     switch (type) {
-        case MSG_STEAL_REQ: return "żądanie KRADZIEŻY (STEAL_REQ)";
-        case MSG_STEAL_REL: return "zwolnienie KRADZIEŻY (STEAL_REL)";
+        case MSG_REQ: return "ŻĄDANIE (REQ)";
+        case MSG_ACK: return "POTWIERDZENIE (ACK)";
         case MSG_TERMINATE: return "ZAKOŃCZENIE PRACY (TERMINATE)";
         default: return "NIEZNANY TYP";
     }
 }
 
 int main(int argc, char* argv[]) {
-    int my_rank, num_procs;
-    MPI_Init(&argc, &argv);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+    int my_rank, num_procs; // Ranga bieżącego procesu i całkowita liczba procesów
+    MPI_Init(&argc, &argv); // Inicjalizacja środowiska MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);    // Pobranie rangi bieżącego procesu
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);  // Pobranie całkowitej liczby procesów
 
-    int clock = 0;
+    int clock = 0; // Zegar Lamporta dla bieżącego procesu
+    
+    // Statusy procesu Ricarta-Agrawali
+    bool requesting_cs = false; // Czy proces aktualnie ubiega się o sekcję krytyczną
+    int my_request_timestamp = -1; // Timestamp mojego bieżącego żądania
+    int replies_received_count = 0; // Licznik otrzymanych ACK
 
-    // Zmieniono: tablice dla każdego domu
-    Request steal_requests_queues[NUM_HOUSES_TOTAL][num_procs];
-    int steal_requests_queue_sizes[NUM_HOUSES_TOTAL];
-    int highest_ts_received_steal[NUM_HOUSES_TOTAL][num_procs];
+    // Kolejka żądań do opóźnionych ACK (dla procesów, które muszą czekać na moje zwolnienie)
+    int deferred_reply_queue[num_procs];
+    int deferred_reply_queue_size = 0;
+
+    // Tablice do śledzenia stanu aktywności innych procesów (dla terminacji)
     bool is_active[num_procs];
-
-    // Inicjalizacja struktur dla każdego domu
-    for (int house = 0; house < NUM_HOUSES_TOTAL; house++) {
-        steal_requests_queue_sizes[house] = 0;
-        for (int i = 0; i < num_procs; i++) {
-            highest_ts_received_steal[house][i] = 0;
-        }
-    }
-    for (int i = 0; i < num_procs; i++) {
+    for(int i=0; i<num_procs; ++i) {
         is_active[i] = true;
     }
 
-    srand(my_rank * time(NULL));
+    srand(my_rank * time(NULL)); // Inicjalizacja generatora liczb losowych
 
+    // Główna pętla symulująca operacje kradzieży
     for (int op_count = 0; op_count < NUM_OPERATIONS; op_count++) {
-        int target_house_id = (my_rank + op_count) % NUM_HOUSES_TOTAL;
-        printf("--- Proces %d --- [Zegar: %d] Rozpoczynam Operację #%d: Próba kradzieży w domu %d. Zwiększam zegar.\n", 
-               my_rank, clock, op_count + 1, target_house_id);
-
-        clock++;
-        clock++;
-        Request my_steal_req = {clock, my_rank};
-        add_to_queue(steal_requests_queues[target_house_id], 
-                    &steal_requests_queue_sizes[target_house_id], 
-                    my_steal_req);
+        // --- PRÓBA WEJŚCIA DO SEKCJI KRYTYCZNEJ ---
+        printf("--- Proces %d --- [Zegar: %d] Rozpoczynam Operację #%d: Próba kradzieży. Zwiększam zegar.\n", my_rank, clock, op_count + 1);
         
-        Message msg_out_steal = {MSG_STEAL_REQ, clock, my_rank, target_house_id};
-        for (int i = 0; i < num_procs; i++) {
+        clock++; // Zdarzenie lokalne: inkrementacja zegara Lamporta
+        requesting_cs = true; // Ustawiam flagę, że ubiegam się o SC
+        my_request_timestamp = clock; // Zapamiętuję timestamp mojego żądania
+        replies_received_count = 0; // Resetuję licznik ACK
+
+        Message msg_out_req = {MSG_REQ, my_request_timestamp, my_rank}; // Przygotowanie wiadomości REQ
+        // printf("--- Proces %d --- [Zegar: %d] Wysyłam **%s** (ts=%d) do wszystkich.\n", my_rank, clock, get_message_type_name(MSG_REQ), my_request_timestamp);
+        for (int i = 0; i < num_procs; i++) { // Rozesłanie żądania do wszystkich innych procesów
             if (i != my_rank) {
-                MPI_Send(&msg_out_steal, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
+                MPI_Send(&msg_out_req, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
             }
         }
-        printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** dla domu %d z moim czasem (ts=%d) do wszystkich innych procesów.\n", 
-               my_rank, clock, get_message_type_name(MSG_STEAL_REQ), target_house_id, clock);
 
-        while (true) {
-            int my_idx_steal = find_my_request_index(
-                steal_requests_queues[target_house_id], 
-                steal_requests_queue_sizes[target_house_id], 
-                my_rank
-            );
-            bool can_enter_steal_cs = (my_idx_steal == 0 && steal_requests_queue_sizes[target_house_id] > 0);
+        // Pętla oczekiwania na możliwość wejścia do sekcji krytycznej (Ricart-Agrawala)
+        while (replies_received_count < (num_procs - 1)) { // Czekaj na ACK od wszystkich N-1 procesów
+            int flag; // Flaga wskazująca, czy jest dostępna wiadomość
+            MPI_Status status; // Status operacji MPI_Recv
             
-            if (can_enter_steal_cs) {
-                for (int i = 0; i < num_procs; i++) {
-                    if (i == my_rank || !is_active[i]) continue;
-                    bool received_later_message_from_i =
-                        (highest_ts_received_steal[target_house_id][i] > my_steal_req.timestamp) ||
-                        (highest_ts_received_steal[target_house_id][i] == my_steal_req.timestamp && i > my_rank);
-                    if (!received_later_message_from_i) {
-                        can_enter_steal_cs = false;
-                        printf("--- Proces %d --- [Zegar: %d] Muszę czekać na odpowiedź od procesu %d dla domu %d. Nie mogę wejść do sekcji kradzieży.\n", 
-                               my_rank, clock, i, target_house_id);
-                        break;
-                    }
-                }
-            }
-
-            if (can_enter_steal_cs) {
-                break;
-            }
-
-            int flag;
-            MPI_Status status;
+            // Sprawdzenie, czy są wiadomości (nieblokujące)
             MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &flag, &status);
-            if (flag) {
+
+            if (flag) { // Jeśli jest wiadomość
                 Message msg_in;
-                MPI_Recv(&msg_in, sizeof(Message), MPI_BYTE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+                MPI_Recv(&msg_in, sizeof(Message), MPI_BYTE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status); // Odbierz wiadomość
+                
+                // Aktualizacja zegara Lamporta na podstawie odebranej wiadomości
                 clock = max(clock, msg_in.timestamp) + 1;
-                printf("--- Proces %d --- [Zegar: %d] Odebrałem wiadomość: **%s** od procesu %d dla domu %d z timestampem (ts=%d). Aktualizuję zegar.\n", 
-                       my_rank, clock, get_message_type_name(msg_in.type), msg_in.sender_rank, msg_in.house_id, msg_in.timestamp);
+                // printf("--- Proces %d --- [Zegar: %d] Odebrałem wiadomość: **%s** od procesu %d (ts=%d).\n", my_rank, clock, get_message_type_name(msg_in.type), msg_in.sender_rank, msg_in.timestamp);
 
-                if (msg_in.type == MSG_TERMINATE) {
-                    is_active[msg_in.sender_rank] = false;
-                    printf("--- Proces %d --- [Zegar: %d] Oznaczam proces %d jako nieaktywny.\n", 
-                           my_rank, clock, msg_in.sender_rank);
-                } else {
-                    int house = msg_in.house_id;
-                    highest_ts_received_steal[house][msg_in.sender_rank] = 
-                        max(highest_ts_received_steal[house][msg_in.sender_rank], msg_in.timestamp);
+                // Przetwarzanie wiadomości w zależności od jej typu
+                if (msg_in.type == MSG_REQ) { // Żądanie dostępu od innego procesu
+                    bool defer_reply = false; // Czy opóźnić odpowiedź?
 
-                    if (msg_in.type == MSG_STEAL_REQ) {
-                        Request new_req = {msg_in.timestamp, msg_in.sender_rank};
-                        add_to_queue(steal_requests_queues[house], 
-                                    &steal_requests_queue_sizes[house], 
-                                    new_req);
-                        printf("--- Proces %d --- [Zegar: %d] Dodano żądanie do kolejki dla domu %d od procesu %d.\n", 
-                               my_rank, clock, house, msg_in.sender_rank);
-                    } else if (msg_in.type == MSG_STEAL_REL) {
-                        remove_from_queue_by_rank(steal_requests_queues[house], 
-                                                &steal_requests_queue_sizes[house], 
-                                                msg_in.sender_rank);
-                        printf("--- Proces %d --- [Zegar: %d] Usunięto żądanie z kolejki dla domu %d od procesu %d.\n", 
-                               my_rank, clock, house, msg_in.sender_rank);
+                    // Jeśli ja się ubiegam ORAZ moje żądanie ma wyższy priorytet (niższy timestamp)
+                    // LUB jeśli moje żądanie ma ten sam timestamp, ale moją rangę jest niższa (reguła rozstrzygania remisu)
+                    if (requesting_cs && 
+                        ((my_request_timestamp < msg_in.timestamp) || 
+                         (my_request_timestamp == msg_in.timestamp && my_rank < msg_in.sender_rank))) {
+                        defer_reply = true; // Opóźnij odpowiedź, bo mam wyższy priorytet
                     }
+
+                    if (defer_reply) {
+                        // Dodaj nadawcę do kolejki oczekujących na ACK
+                        deferred_reply_queue[deferred_reply_queue_size++] = msg_in.sender_rank;
+                        // printf("--- Proces %d --- [Zegar: %d] Opóźniam ACK dla procesu %d. Moje żądanie (ts=%d) ma wyższy priorytet.\n", my_rank, clock, msg_in.sender_rank, my_request_timestamp);
+                    } else {
+                        // Wysyłam ACK od razu
+                        clock++; // Zdarzenie lokalne: wysłanie ACK
+                        Message msg_out_ack = {MSG_ACK, clock, my_rank};
+                        MPI_Send(&msg_out_ack, sizeof(Message), MPI_BYTE, msg_in.sender_rank, 0, MPI_COMM_WORLD);
+                        // printf("--- Proces %d --- [Zegar: %d] Wysłałem **%s** do procesu %d.\n", my_rank, clock, get_message_type_name(MSG_ACK), msg_in.sender_rank);
+                    }
+                } else if (msg_in.type == MSG_ACK) { // Otrzymanie ACK od innego procesu
+                    replies_received_count++; // Zwiększ licznik otrzymanych ACK
+                    // printf("--- Proces %d --- [Zegar: %d] Otrzymałem ACK od procesu %d. Liczba ACK: %d/%d\n", my_rank, clock, msg_in.sender_rank, replies_received_count, num_procs - 1);
+                } else if (msg_in.type == MSG_TERMINATE) { // Wiadomość o zakończeniu pracy od innego procesu
+                    is_active[msg_in.sender_rank] = false; // Oznacz proces jako nieaktywny
+                    // Jeśli proces zakończył pracę, a ja go brałem pod uwagę do ACK, to mogę to uznać za otrzymane ACK
+                    // Jest to uproszczenie, aby symulacja nie zawieszała się na oczekiwaniu na nieaktywne procesy.
+                    // W bardziej robustnym systemie należałoby to rozwiązać inaczej (np. algorytm kworum).
+                    replies_received_count++; 
+                    printf("--- Proces %d --- [Zegar: %d] Proces %d zakończył pracę. Uznaję to jako otrzymane ACK.\n", my_rank, clock, msg_in.sender_rank);
                 }
             } else {
-                usleep(1000);
+                usleep(10000); // Krótka pauza, aby nie obciążać CPU w pętli oczekiwania
             }
         }
 
-        clock++;
-        printf("--- Proces %d --- [Zegar: %d] *** WSZEDŁEM DO SEKCJI KRYTYCZNEJ KRADZIEŻY! *** Okradam dom %d.\n", 
-               my_rank, clock, target_house_id);
-        usleep((rand() % 100 + 50) * 1000);
+        // --- WEJŚCIE DO SEKCJI KRYTYCZNEJ ---
+        clock++; // Zdarzenie lokalne: inkrementacja zegara
+        int target_house_id = (my_rank + op_count) % NUM_HOUSES_TOTAL; // Symboliczny wybór domu do okradzenia
+        printf("--- Proces %d --- [Zegar: %d] *** WSZEDŁEM DO SEKCJI KRYTYCZNEJ KRADZIEŻY! *** Okradam dom o symbolicznym ID: %d.\n", my_rank, clock, target_house_id);
 
-        clock++;
-        remove_from_queue_by_rank(steal_requests_queues[target_house_id], 
-                                 &steal_requests_queue_sizes[target_house_id], 
-                                 my_rank);
-        Message msg_steal_rel = {MSG_STEAL_REL, clock, my_rank, target_house_id};
-        for (int i = 0; i < num_procs; i++) {
-            if (i != my_rank) {
-                MPI_Send(&msg_steal_rel, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
-            }
+        usleep((rand() % 100 + 50) * 1000); // Symulacja czasu trwania kradzieży
+
+        // --- WYJŚCIE Z SEKCJI KRYTYCZNEJ ---
+        clock++; // Zdarzenie lokalne: inkrementacja zegara
+        requesting_cs = false; // Nie ubiegam się już o SC
+
+        printf("--- Proces %d --- [Zegar: %d] *** WYSZEDŁEM Z SEKCJI KRYTYCZNEJ KRADZIEŻY. *** Wysyłam opóźnione ACK.\n", my_rank, clock);
+        // Wysyłanie opóźnionych ACK
+        for (int i = 0; i < deferred_reply_queue_size; i++) {
+            int target_rank = deferred_reply_queue[i];
+            Message msg_out_ack = {MSG_ACK, clock, my_rank}; // ACK z aktualnym timestampem
+            MPI_Send(&msg_out_ack, sizeof(Message), MPI_BYTE, target_rank, 0, MPI_COMM_WORLD);
+            // printf("--- Proces %d --- [Zegar: %d] Wysłałem opóźnione **%s** do procesu %d.\n", my_rank, clock, get_message_type_name(MSG_ACK), target_rank);
         }
-        printf("--- Proces %d --- [Zegar: %d] *** WYSZEDŁEM Z SEKCJI KRYTYCZNEJ KRADZIEŻY. *** Wysłałem wiadomość **%s** dla domu %d (ts=%d) do wszystkich innych procesów.\n", 
-               my_rank, clock, get_message_type_name(MSG_STEAL_REL), target_house_id, clock);
-        printf("--- Proces %d --- [Zegar: %d] Zakończyłem Operacj #%d (dom %d). Odpoczywam przed kolejną próbą.\n", 
-               my_rank, clock, op_count + 1, target_house_id);
-        usleep((rand() % 50) * 1000);
+        deferred_reply_queue_size = 0; // Wyczyść kolejkę opóźnionych odpowiedzi
+
+        printf("--- Proces %d --- [Zegar: %d] Zakończyłem Operację #%d. Odpoczywam przed kolejną próbą.\n", my_rank, clock, op_count + 1);
+        usleep((rand() % 50) * 1000); // Symulacja odpoczynku
     }
 
-    Message msg_terminate = {MSG_TERMINATE, clock, my_rank, -1};
+    // Po zakończeniu wszystkich operacji, proces informuje inne procesy o swoim zakończeniu
+    Message msg_terminate = {MSG_TERMINATE, clock, my_rank}; // Przygotuj wiadomość o zakończeniu
     for (int i = 0; i < num_procs; i++) {
         if (i != my_rank) {
-            MPI_Send(&msg_terminate, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD);
+            MPI_Send(&msg_terminate, sizeof(Message), MPI_BYTE, i, 0, MPI_COMM_WORLD); // Wyślij do innych
         }
     }
-    printf("--- Proces %d --- [Zegar: %d] Wysłałem wiadomość **%s** do wszystkich innych procesów przed zakończeniem.\n", 
-           my_rank, clock, get_message_type_name(MSG_TERMINATE));
+    printf("--- Proces %d --- [Zegar: %d] Zakończyłem wszystkie zaplanowane operacje kradzieży. Finalizuję pracę.\n", my_rank, clock);
 
-    printf("--- Proces %d --- [Zegar: %d] Zakończyłem wszystkie zaplanowane operacje kradzieży. Finalizuję pracę.\n", 
-           my_rank, clock);
-    MPI_Barrier(MPI_COMM_WORLD);
-    MPI_Finalize();
+    MPI_Barrier(MPI_COMM_WORLD); // Bariera, aby upewnić się, że wszystkie procesy doszły do tego punktu przed finalizacją
+    MPI_Finalize(); // Zakończenie pracy środowiska MPI
     return 0;
 }
